@@ -1,0 +1,62 @@
+# Step 1: a small real data source. Prometheus scrapes the host, Postgres and a load generator.
+# Start:  docker compose up -d      Open Prometheus: http://localhost:9090
+services:
+  node_exporter:                      # host CPU, memory, disk I/O wait, network, filesystems
+    image: prom/node-exporter:v1.8.2
+    command:
+      - "--path.rootfs=/host"
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    pid: host
+    ports: ["9100:9100"]
+    volumes:
+      - "/:/host:ro"
+    restart: unless-stopped
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_PASSWORD: lab, POSTGRES_DB: pay}
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    command: ["postgres", "-c", "track_io_timing=on", "-c", "shared_preload_libraries=pg_stat_statements"]
+    restart: unless-stopped
+
+  postgres_exporter:                  # commit/transaction counters, sessions, locks, wait stats
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:lab@postgres:5432/pay?sslmode=disable"
+    ports: ["9187:9187"]
+    depends_on: [postgres]
+    restart: unless-stopped
+
+  loadgen:                            # steady synthetic "Airtel Money" writes (pgbench)
+    image: postgres:16
+    environment: {PGPASSWORD: lab}
+    depends_on: [postgres]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until pg_isready -h postgres -U postgres; do sleep 2; done
+        pgbench -i -s 20 -h postgres -U postgres pay
+        while true; do pgbench -c 8 -j 2 -T 300 -R 200 -P 30 -h postgres -U postgres pay; done
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=14d"]
+    ports: ["9090:9090"]
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro", "promdata:/prometheus"]
+    restart: unless-stopped
+  
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: lab
+    volumes:
+      - "grafanadata:/var/lib/grafana"
+    depends_on: [prometheus]
+    restart: unless-stopped
+
+volumes: {pgdata: {}, promdata: {}, grafanadata: {}}
